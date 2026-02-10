@@ -398,4 +398,6 @@ async function scrapeEbay(searchConfig) {
         }
       });
 
-      const relevantItems = items.filter(item
+      const relevantItems = items.filter(item => item.aiScore >= 30);
+
+      return relevantItems;
