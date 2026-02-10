@@ -1,0 +1,57 @@
+{
+  "name": "ebay-deal-monitor",
+  "version": "1.0.0",
+  "description": "Automated eBay deal finder with AI ranking powered by Gemini",
+  "main": "scanner.js",
+  "scripts": {
+    "start": "node scanner.js",
+    "test": "node scanner.js"
+  },
+  "keywords": [
+    "ebay",
+    "deals",
+    "automation",
+    "ai",
+    "gemini"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "node-fetch": "^2.7.0",
+    "jsdom": "^23.2.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+```
+
+---
+
+## 4. `.gitignore`
+```
+# Dependencies
+node_modules/
+package-lock.json
+
+# Logs
+*.log
+scan-log.txt
+
+# Environment variables
+.env
+.env.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+temp/
