@@ -31,7 +31,7 @@ jobs:
         env:
           SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          GOOGLE_SCRIPT_URL: ${{ secrets.GOOGLE_SCRIPT_URL }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
         run: node scanner.js
       
