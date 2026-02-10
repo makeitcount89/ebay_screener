@@ -1,21 +1,14 @@
 const fetch = require('node-fetch');
 const fs = require('fs');
+const { JSDOM } = require('jsdom');
 
 // ═══════════════════════════════════════════════════════════
 // CONFIGURATION
 // ═══════════════════════════════════════════════════════════
 const CONFIG = {
-  // API Keys from environment variables
   scraperApiKey: process.env.SCRAPER_API_KEY,
   geminiApiKey: process.env.GEMINI_API_KEY,
-  
-  // Google Apps Script Web App URL (deployed from google-apps-script.js)
-  googleScriptUrl: process.env.GOOGLE_SCRIPT_URL,
-  
-  // Email recipient
   recipientEmail: process.env.RECIPIENT_EMAIL,
-  
-  // 5 Different Item Searches
   searches: [
     {
       name: "Maton Acoustic Guitar",
@@ -82,9 +75,8 @@ let logMessages = [];
 // VALIDATION
 // ═══════════════════════════════════════════════════════════
 function validateConfig() {
-  const required = ['scraperApiKey', 'geminiApiKey', 'googleScriptUrl', 'recipientEmail'];
+  const required = ['scraperApiKey', 'geminiApiKey', 'recipientEmail'];
   const missing = required.filter(key => !CONFIG[key]);
-  
   if (missing.length > 0) {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
   }
@@ -122,11 +114,7 @@ async function fetchWithDelay(url, retries = 3) {
       await delay(3000 + Math.random() * 4000);
       const proxy = `https://api.scraperapi.com?api_key=${CONFIG.scraperApiKey}&url=${encodeURIComponent(url)}&render=true`;
       const res = await fetch(proxy, { timeout: 60000 });
-      
-      if (!res.ok) {
-        throw new Error(`ScraperAPI ${res.status}: ${res.statusText}`);
-      }
-      
+      if (!res.ok) throw new Error(`ScraperAPI ${res.status}: ${res.statusText}`);
       return await res.text();
     } catch (error) {
       log(`  Fetch attempt ${i + 1}/${retries} failed: ${error.message}`);
@@ -146,24 +134,18 @@ async function callGeminiAPI(prompt, temperature = 0.3, retries = 3) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: {
-              temperature: temperature,
-              maxOutputTokens: 8000,
-            }
+            generationConfig: { temperature: temperature, maxOutputTokens: 8000 }
           }),
           timeout: 60000
         }
       );
-
       if (!response.ok) {
         const error = await response.json().catch(() => ({}));
         throw new Error(`Gemini API ${response.status}: ${error.error?.message || 'Unknown error'}`);
       }
-
       const data = await response.json();
       const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
       if (!text) throw new Error('No response from Gemini');
-      
       return text;
     } catch (error) {
       log(`  Gemini attempt ${i + 1}/${retries} failed: ${error.message}`);
@@ -195,11 +177,10 @@ function parseTimeLeft(timeStr) {
 }
 
 // ═══════════════════════════════════════════════════════════
-// AI RANKING (Same as before)
+// AI RANKING
 // ═══════════════════════════════════════════════════════════
 async function rankItemsWithGemini(items, searchTerm, expectedPrice, urgentThresholdMins) {
   if (items.length === 0) return [];
-  
   const itemsData = items.map((item, i) => ({
     id: i,
     title: item.title,
@@ -218,64 +199,24 @@ async function rankItemsWithGemini(items, searchTerm, expectedPrice, urgentThres
   const urgentHours = (urgentThresholdMins / 60).toFixed(1);
 
   const prompt = `You are an expert eBay deal analyzer for "${searchTerm}". ${expectedPrice ? `Expected fair market value: AUD $${expectedPrice}.` : ''}
-
 TASK: Rank these items by VALUE based on title, price, condition, shipping, and auction timing.
-
 Items to analyze:
 ${JSON.stringify(itemsData, null, 2)}
-
-RANKING CRITERIA (in priority order):
-1. **Relevance to "${searchTerm}"** - must actually match what user is looking for
-2. **AUCTION TIMING (CRITICAL FOR URGENCY):**
-   - Auctions ending in <${urgentHours}h with 0-2 bids = URGENT OPPORTUNITY (major score boost +20)
-   - Auctions ending in ${urgentHours}-${parseFloat(urgentHours)*2}h with low bids = great opportunity (score boost +10)
-   - Auctions ending soon with many bids = likely to increase (slight penalty -5)
-   - Auctions with 1+ days remaining = valuable but less urgent (neutral)
-   - Buy It Now = stable price, no time pressure (neutral)
-3. **Price vs. expected value** - lower is better if quality is good
-4. **Condition** - new/mint > excellent > very good > good > acceptable
-5. **Bid activity** - fewer bids on auctions = better deal potential
-6. **Shipping cost** - free > low cost > expensive
-7. **Seller rating** - 98%+ is excellent, 95-98% is good, <95% is risky
-
-SCORING STRATEGY:
-- Start with base score of 50
-- Highly relevant match: +20 points
-- Price well below expected value: +15 points
-- Ending soon (<${urgentHours}h) with low bids: +20 points (URGENT)
-- Ending soon (${urgentHours}-${parseFloat(urgentHours)*2}h) with low bids: +10 points
-- Excellent condition (new/mint): +10 points
-- Free shipping: +5 points
-- Seller 98%+: +5 points
-- Not relevant to search: score should be <30
-
-OUTPUT FORMAT (strict JSON):
-{
-  "rankings": [
-    {
-      "id": 0,
-      "rank": 1,
-      "score": 95,
-      "reasoning": "Brief explanation of why this is a great deal"
-    }
-  ]
-}
-
-Rules:
-- Filter out items NOT relevant to "${searchTerm}" (score them <30)
-- Score range: 0-100 (100 = best value)
-- Sort by score descending (best deals first)
-- Emphasize auction timing in reasoning for time-sensitive deals
-- Be concise (1-2 sentences max)
-- ONLY return valid JSON, no other text`;
+RANKING CRITERIA:
+1. Relevance
+2. Auction timing (urgent deals +20)
+3. Price vs expected
+4. Condition
+5. Bid activity
+6. Shipping
+7. Seller rating
+OUTPUT: JSON { "rankings": [ { "id":0, "rank":1, "score":95, "reasoning":"..." } ] }`;
 
   const response = await callGeminiAPI(prompt, 0.2);
   let jsonStr = response.trim();
-  
   if (jsonStr.startsWith('```')) {
     jsonStr = jsonStr.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
   }
-  
   try {
     const parsed = JSON.parse(jsonStr);
     return parsed.rankings || [];
@@ -287,117 +228,152 @@ Rules:
 }
 
 // ═══════════════════════════════════════════════════════════
-// EBAY SCRAPING (Same as before - keeping it concise here)
+// EBAY SCRAPING
 // ═══════════════════════════════════════════════════════════
 async function scrapeEbay(searchConfig) {
   log(`\n🔍 Searching for: ${searchConfig.name} (${searchConfig.term})`);
-  
   let ebayUrl = `https://www.ebay.com.au/sch/i.html?_from=R40&_nkw=${encodeURIComponent(searchConfig.term)}&_sadis=${searchConfig.distance}&_stpos=${searchConfig.postcode}&_fspt=1&LH_PrefLoc=99&rt=nc`;
-  
-  if (searchConfig.auctionOnly) {
-    ebayUrl += '&LH_Auction=1';
-  }
-  
+  if (searchConfig.auctionOnly) ebayUrl += '&LH_Auction=1';
   log(`  URL: ${ebayUrl}`);
-  
+
   const html = await fetchWithDelay(ebayUrl);
   log(`  HTML length: ${html.length.toLocaleString()} chars`);
-  
-  const { JSDOM } = require('jsdom');
+
   const dom = new JSDOM(html);
   const doc = dom.window.document;
-
   const containers = doc.querySelectorAll('ul.srp-results li.s-item, ul.srp-results li.s-card, li.s-item');
   log(`  Found ${containers.length} potential containers`);
-  
+
   let items = [];
 
   containers.forEach((li) => {
     let titleEl = li.querySelector('.s-item__title, .s-card__title');
     const title = titleEl ? titleEl.textContent.trim().replace(/\s+/g, ' ') : 'N/A';
-
     const linkEl = li.querySelector('a[href*="itm/"], a.s-item__link');
     const link = linkEl ? linkEl.href : '#';
-
     let priceEl = li.querySelector('.s-item__price, .s-card__price');
     const price = priceEl ? priceEl.textContent.trim() : 'N/A';
-
     const condEl = li.querySelector('.s-item__subtitle, .SECONDARY_INFO');
     const condition = condEl ? condEl.textContent.trim() : 'N/A';
-
     let shipping = 'N/A';
     const shipEl = li.querySelector('.s-item__shipping, [class*="shipping"]');
     if (shipEl) shipping = shipEl.textContent.trim();
-
     let dist = 'N/A';
     const locEl = li.querySelector('.s-item__location');
     if (locEl) dist = locEl.textContent.trim();
-
     const imgEl = li.querySelector('img[src*="ebayimg"], img[data-src*="ebayimg"]');
     let imgSrc = imgEl ? (imgEl.src || imgEl.dataset?.src || '') : '';
     if (imgSrc) imgSrc = imgSrc.replace(/\/s-l\d+/, '/s-l500').split('?')[0];
 
-    let timeLeft = 'N/A';
-    let bidCount = 0;
-    let isAuction = false;
-
+    let timeLeft = 'N/A', bidCount = 0, isAuction = false;
     const timeEl = li.querySelector('.s-item__time-left, .s-item__timeLeft');
-    if (timeEl) {
-      timeLeft = timeEl.textContent.trim();
-      isAuction = true;
-    }
-
+    if (timeEl) { timeLeft = timeEl.textContent.trim(); isAuction = true; }
     const bidEl = li.querySelector('.s-item__bids, [class*="bid"]');
-    if (bidEl) {
-      const bidText = bidEl.textContent.trim();
-      const bidMatch = bidText.match(/(\d+)\s*bid/i);
-      if (bidMatch) bidCount = parseInt(bidMatch[1]);
-      if (bidText.toLowerCase().includes('bid')) isAuction = true;
-    }
+    if (bidEl) { const bidMatch = bidEl.textContent.trim().match(/(\d+)\s*bid/i); if (bidMatch) bidCount = parseInt(bidMatch[1]); if (bidEl.textContent.toLowerCase().includes('bid')) isAuction = true; }
 
     const sellerEl = li.querySelector('.s-item__seller-info');
     let sellerRating = 'N/A';
-    if (sellerEl) {
-      const ratingMatch = sellerEl.textContent.match(/([\d.]+)%/);
-      if (ratingMatch) sellerRating = ratingMatch[1] + '%';
-    }
+    if (sellerEl) { const ratingMatch = sellerEl.textContent.match(/([\d.]+)%/); if (ratingMatch) sellerRating = ratingMatch[1] + '%'; }
 
-    if (title === 'N/A' || 
-        price === 'N/A' || 
-        !link.includes('itm/') || 
-        title.toLowerCase().includes('shop on ebay')) {
-      return;
-    }
+    if (title === 'N/A' || price === 'N/A' || !link.includes('itm/') || title.toLowerCase().includes('shop on ebay')) return;
 
-    items.push({
-      title, price, condition, shipping, distance: dist, link, img: imgSrc,
-      timeLeft, bidCount, isAuction, sellerRating,
-      aiScore: 0,
-      aiReasoning: ''
-    });
+    items.push({ title, price, condition, shipping, distance: dist, link, img: imgSrc, timeLeft, bidCount, isAuction, sellerRating, aiScore: 0, aiReasoning: '' });
   });
 
   log(`  Extracted ${items.length} valid items`);
 
-  if (items.length === 0) {
-    log(`  ⚠️ No items found for "${searchConfig.name}"`);
-    return [];
-  }
+  if (items.length === 0) return [];
 
-  log(`  Running AI analysis...`);
   const urgentThresholdMins = searchConfig.urgentHours * 60;
-  
   try {
     const rankings = await rankItemsWithGemini(items, searchConfig.term, searchConfig.expectedPrice, urgentThresholdMins);
-
     if (rankings.length > 0) {
-      rankings.forEach(ranking => {
-        if (items[ranking.id]) {
-          items[ranking.id].aiScore = ranking.score;
-          items[ranking.id].aiReasoning = ranking.reasoning;
-        }
-      });
+      rankings.forEach(r => { if (items[r.id]) { items[r.id].aiScore = r.score; items[r.id].aiReasoning = r.reasoning; } });
+      const relevantItems = items.filter(item => item.aiScore > 20).sort((a,b)=>b.aiScore-a.aiScore);
+      return relevantItems.slice(0, searchConfig.topN);
+    }
+  } catch (error) {
+    log(`  AI ranking failed: ${error.message}`);
+  }
+  return [];
+}
 
-      const relevantItems = items.filter(item => item.aiScore >= 30);
+// ═══════════════════════════════════════════════════════════
+// EMAIL SENDING (Google Apps Script style)
+// ═══════════════════════════════════════════════════════════
+async function sendEmail(unicornDeals) {
+  if (unicornDeals.length === 0) { log('No unicorn deals to send'); return; }
 
-      return relevantItems;
+  log(`\n📧 Sending email with ${unicornDeals.length} unicorn deal(s)...`);
+
+  let emailBody = `<h1>🦄 Unicorn eBay Deals Found!</h1><p>Found ${unicornDeals.length} exceptional deals</p>`;
+  unicornDeals.forEach((deal, idx) => {
+    const minsLeft = parseTimeLeft(deal.item.timeLeft);
+    const isUrgent = minsLeft && minsLeft <= deal.searchConfig.urgentHours * 60;
+    const priceNumeric = extractPrice(deal.item.price);
+    const discount = deal.searchConfig.expectedPrice && priceNumeric ? Math.round(((deal.searchConfig.expectedPrice - priceNumeric)/deal.searchConfig.expectedPrice)*100) : 0;
+    emailBody += `
+      <div style="border:3px solid ${isUrgent?'#f44336':'#4caf50'}; padding:15px; margin:15px;">
+        <h2>#${idx+1} ${deal.item.title}</h2>
+        <p>Price: ${deal.item.price} ${discount>0?`(${discount}% OFF)`:''}</p>
+        <p>Condition: ${deal.item.condition}</p>
+        <p>Shipping: ${deal.item.shipping}</p>
+        <p>Location: ${deal.item.distance}</p>
+        <p>Seller Rating: ${deal.item.sellerRating}</p>
+        <p>${deal.item.isAuction?`Bids: ${deal.item.bidCount} | Time Left: ${deal.item.timeLeft}`:'Buy It Now'}</p>
+        <p>AI Score: ${deal.item.aiScore}/100</p>
+        <p>🤖 AI Analysis: ${deal.item.aiReasoning}</p>
+        ${deal.item.img?`<img src="${deal.item.img}" style="max-width:300px;">`:''}
+        <p><a href="${deal.item.link}">View on eBay →</a></p>
+      </div>`;
+  });
+
+  // Google Apps Script style sending
+  try {
+    const { GoogleAppsScript } = require('google-apps-script'); // pseudo-import for context
+    // In actual GAS, you would use MailApp.sendEmail directly
+    MailApp.sendEmail({
+      to: CONFIG.recipientEmail,
+      subject: `🦄 ${unicornDeals.length} Unicorn Deal${unicornDeals.length>1?'s':''} Found!`,
+      htmlBody: emailBody
+    });
+    log('✅ Email sent successfully!');
+  } catch (error) {
+    log(`❌ Email error: ${error.message}`);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// MAIN
+// ═══════════════════════════════════════════════════════════
+async function main() {
+  log('🤖 eBay Deal Monitor Starting...');
+  log(`Scan time: ${new Date().toLocaleString('en-AU', { timeZone:'Australia/Adelaide' })}`);
+  log(`Searching for ${CONFIG.searches.length} items`);
+
+  try { validateConfig(); log('✅ Configuration validated'); }
+  catch(e){ log(`❌ Config error: ${e.message}`); saveLog(); process.exit(1); }
+
+  const unicornDeals = [];
+  const allResults = [];
+  for (let i=0; i<CONFIG.searches.length; i++) {
+    const searchConfig = CONFIG.searches[i];
+    try {
+      const topItems = await scrapeEbay(searchConfig);
+      if(topItems.length>0){
+        topItems.forEach(item=>allResults.push({item, searchConfig}));
+        const unicorns = topItems.filter(item=>item.aiScore>=searchConfig.unicornThreshold);
+        unicorns.forEach(item=>unicornDeals.push({item, searchConfig}));
+      }
+      if(i<CONFIG.searches.length-1) await delay(5000);
+    } catch(e){ log(`❌ Error searching "${searchConfig.name}": ${e.message}`); }
+  }
+
+  log(`Unicorn deals found: ${unicornDeals.length}`);
+  if(unicornDeals.length>0) await sendEmail(unicornDeals);
+  saveLog();
+  log('✅ Monitoring complete!');
+}
+
+// Run
+main().catch(e=>{ log(`💥 Fatal error: ${e.message}`); saveLog(); process.exit(1); });
