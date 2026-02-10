@@ -160,29 +160,37 @@ function parseTimeLeft(timeStr) {
 // ═══════════════════════════════════════════════════════════
 // AI RANKING
 // ═══════════════════════════════════════════════════════════
-async function rankItemsWithGemini(items, searchTerm, expectedPrice, urgentThresholdMins) {
+async function rankItemsWithGemini(items, searchTerm, expectedPrice, urgentThresholdMins, includeDescriptions = false) {
   if (items.length === 0) return [];
   
-  const itemsData = items.map((item, i) => ({
-    id: i,
-    title: item.title,
-    price: item.price,
-    priceNumeric: extractPrice(item.price) || 0,
-    condition: item.condition,
-    shipping: item.shipping,
-    location: item.distance,
-    isAuction: item.isAuction,
-    timeLeft: item.timeLeft,
-    timeLeftMinutes: parseTimeLeft(item.timeLeft),
-    bidCount: item.bidCount,
-    sellerRating: item.sellerRating
-  }));
+  const itemsData = items.map((item, i) => {
+    const obj = {
+      id: i,
+      title: item.title,
+      price: item.price,
+      priceNumeric: extractPrice(item.price) || 0,
+      condition: item.condition,
+      shipping: item.shipping,
+      location: item.distance,
+      isAuction: item.isAuction,
+      timeLeft: item.timeLeft,
+      timeLeftMinutes: parseTimeLeft(item.timeLeft),
+      bidCount: item.bidCount,
+      sellerRating: item.sellerRating
+    };
+    
+    if (includeDescriptions && item.description) {
+      obj.description = item.description.substring(0, 1500); // Limit to 1500 chars for AI
+    }
+    
+    return obj;
+  });
 
   const urgentHours = (urgentThresholdMins / 60).toFixed(1);
 
   const prompt = `You are an expert eBay deal analyzer for "${searchTerm}". ${expectedPrice ? `Expected fair market value: AUD $${expectedPrice}.` : ''}
 
-TASK: Rank these items by VALUE based on title, price, condition, shipping, and auction timing.
+${includeDescriptions ? 'TASK: Rank these items by VALUE (considering price, condition, descriptions, AND auction timing).' : 'TASK: Rank these items by VALUE based on title, price, condition, shipping, and auction timing.'}
 
 Items to analyze:
 ${JSON.stringify(itemsData, null, 2)}
@@ -200,6 +208,15 @@ RANKING CRITERIA (in priority order):
 5. **Bid activity** - fewer bids on auctions = better deal potential
 6. **Shipping cost** - free > low cost > expensive
 7. **Seller rating** - 98%+ is excellent, 95-98% is good, <95% is risky
+${includeDescriptions ? `8. **Description quality indicators:**
+   - Includes case/accessories/extras (+10 points)
+   - Recently serviced/maintained (+5 points)
+   - Well cared for, excellent working order (+5 points)
+9. **Description RED FLAGS (CRITICAL):**
+   - "as-is", "for parts", "not working" (-30 points)
+   - Damage, cracks, repairs needed (-20 points)
+   - Missing parts, no accessories (-10 points)
+   - "needs work", "project", "restore" (-15 points)` : ''}
 
 SCORING STRATEGY:
 - Start with base score of 50
@@ -210,6 +227,7 @@ SCORING STRATEGY:
 - Excellent condition (new/mint): +10 points
 - Free shipping: +5 points
 - Seller 98%+: +5 points
+${includeDescriptions ? '- Description shows quality/completeness: +10 points\n- RED FLAGS in description: -15 to -30 points' : ''}
 - Not relevant to search: score should be <30
 
 OUTPUT FORMAT (strict JSON):
@@ -219,7 +237,7 @@ OUTPUT FORMAT (strict JSON):
       "id": 0,
       "rank": 1,
       "score": 95,
-      "reasoning": "Brief explanation of why this is a great deal"
+      "reasoning": "Brief explanation of why this is a great deal${includeDescriptions ? ', mention any red flags or quality indicators from description' : ''}"
     }
   ]
 }
@@ -229,7 +247,8 @@ Rules:
 - Score range: 0-100 (100 = best value)
 - Sort by score descending (best deals first)
 - Emphasize auction timing in reasoning for time-sensitive deals
-- Be concise (1-2 sentences max)
+${includeDescriptions ? '- CRITICAL: Mention red flags from description if present\n- Highlight quality indicators from description' : ''}
+- Be concise (2-3 sentences max)
 - ONLY return valid JSON, no other text`;
 
   const response = await callGeminiAPI(prompt, 0.2);
@@ -246,6 +265,51 @@ Rules:
     log(`  Failed to parse Gemini response: ${error.message}`);
     log(`  Raw response: ${jsonStr.substring(0, 200)}...`);
     return [];
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// DESCRIPTION FETCHING
+// ═══════════════════════════════════════════════════════════
+async function fetchDescription(item) {
+  try {
+    log(`    Fetching description: ${item.title.substring(0, 50)}...`);
+    
+    const itemHtml = await fetchWithDelay(item.link);
+    
+    const { JSDOM } = require('jsdom');
+    const dom = new JSDOM(itemHtml);
+    const itemDoc = dom.window.document;
+
+    let desc = 'No description available';
+    
+    // Try iframe description first
+    const iframe = itemDoc.querySelector('#desc_ifr');
+    if (iframe?.src) {
+      const iframeHtml = await fetchWithDelay(iframe.src);
+      const iframeDom = new JSDOM(iframeHtml);
+      const body = iframeDom.window.document.body;
+      if (body) {
+        desc = body.textContent.trim().replace(/\s+/g, ' ');
+      }
+    } else {
+      // Fallback to direct description
+      const fallback = itemDoc.querySelector('#ds_div, #desc_div, .itemAttr, .vi-desc-main, .description__text');
+      if (fallback) {
+        desc = fallback.textContent.trim().replace(/\s+/g, ' ');
+      }
+    }
+
+    // Clean up description
+    desc = desc.replace(/\/\*.*?\*\//g, '').replace(/\$M_[^=]+=.*/g, '').replace(/\{.*$/g, '').trim();
+    if (desc.includes('Seller assumes')) {
+      desc = desc.split('Seller assumes')[0].trim();
+    }
+
+    return desc || 'No description available';
+  } catch (error) {
+    log(`    ⚠️ Failed to fetch description: ${error.message}`);
+    return `Error fetching description: ${error.message}`;
   }
 }
 
@@ -335,6 +399,7 @@ async function scrapeEbay(searchConfig) {
     items.push({
       title, price, condition, shipping, distance: dist, link, img: imgSrc,
       timeLeft, bidCount, isAuction, sellerRating,
+      description: '',
       aiScore: 0,
       aiReasoning: ''
     });
@@ -347,34 +412,86 @@ async function scrapeEbay(searchConfig) {
     return [];
   }
 
-  log(`  Running AI analysis...`);
+  // ═══════════════════════════════════════════════════════════
+  // PASS 1: AI Ranking WITHOUT Descriptions
+  // ═══════════════════════════════════════════════════════════
+  log(`  🤖 Pass 1: AI ranking by title/price/condition...`);
   const urgentThresholdMins = searchConfig.urgentHours * 60;
   
   try {
-    const rankings = await rankItemsWithGemini(items, searchConfig.term, searchConfig.expectedPrice, urgentThresholdMins);
+    const rankings = await rankItemsWithGemini(items, searchConfig.term, searchConfig.expectedPrice, urgentThresholdMins, false);
 
-    if (rankings.length > 0) {
-      rankings.forEach(ranking => {
-        if (items[ranking.id]) {
-          items[ranking.id].aiScore = ranking.score;
-          items[ranking.id].aiReasoning = ranking.reasoning;
-        }
-      });
-
-      const relevantItems = items.filter(item => item.aiScore > 20);
-      relevantItems.sort((a, b) => b.aiScore - a.aiScore);
-
-      const topItems = relevantItems.slice(0, searchConfig.topN);
-      
-      if (topItems.length > 0) {
-        log(`  ✅ Top item: ${topItems[0].title.substring(0, 60)}... (Score: ${topItems[0].aiScore})`);
-      }
-
-      return topItems;
-    } else {
+    if (rankings.length === 0) {
       log(`  ⚠️ AI ranking returned no results`);
       return [];
     }
+
+    rankings.forEach(ranking => {
+      if (items[ranking.id]) {
+        items[ranking.id].aiScore = ranking.score;
+        items[ranking.id].aiReasoning = ranking.reasoning;
+      }
+    });
+
+    const relevantItems = items.filter(item => item.aiScore > 20);
+    relevantItems.sort((a, b) => b.aiScore - a.aiScore);
+
+    const topItems = relevantItems.slice(0, searchConfig.topN);
+    
+    if (topItems.length > 0) {
+      log(`  ✅ Pass 1 complete - Top item: ${topItems[0].title.substring(0, 60)}... (Score: ${topItems[0].aiScore})`);
+    }
+
+    // Filter initial unicorns
+    const unicorns = topItems.filter(item => item.aiScore >= searchConfig.unicornThreshold);
+    
+    if (unicorns.length === 0) {
+      log(`  No unicorns found (best score: ${topItems[0]?.aiScore || 'N/A'})`);
+      return [];
+    }
+
+    log(`  🦄 ${unicorns.length} potential unicorn(s) found - fetching descriptions...`);
+
+    // ═══════════════════════════════════════════════════════════
+    // PASS 2: Fetch Descriptions for Unicorns
+    // ═══════════════════════════════════════════════════════════
+    for (let i = 0; i < unicorns.length; i++) {
+      const item = unicorns[i];
+      item.description = await fetchDescription(item);
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // PASS 3: AI Re-ranking WITH Descriptions
+    // ═══════════════════════════════════════════════════════════
+    log(`  🤖 Pass 2: AI re-ranking unicorns with descriptions...`);
+    
+    const reRankings = await rankItemsWithGemini(unicorns, searchConfig.term, searchConfig.expectedPrice, urgentThresholdMins, true);
+
+    if (reRankings.length > 0) {
+      reRankings.forEach(ranking => {
+        if (unicorns[ranking.id]) {
+          unicorns[ranking.id].aiScore = ranking.score;
+          unicorns[ranking.id].aiReasoning = ranking.reasoning;
+        }
+      });
+
+      unicorns.sort((a, b) => b.aiScore - a.aiScore);
+    }
+
+    // Filter again after description analysis (some may have red flags)
+    const finalUnicorns = unicorns.filter(item => item.aiScore >= searchConfig.unicornThreshold);
+
+    if (finalUnicorns.length > 0) {
+      log(`  ✅ Final: ${finalUnicorns.length} confirmed unicorn(s) after description analysis`);
+      finalUnicorns.forEach((item, i) => {
+        log(`     ${i+1}. ${item.title.substring(0, 60)}... (Final Score: ${item.aiScore})`);
+      });
+    } else {
+      log(`  ⚠️ All unicorns filtered out after description analysis`);
+    }
+
+    return finalUnicorns;
+
   } catch (error) {
     log(`  ❌ AI ranking failed: ${error.message}`);
     return [];
@@ -415,6 +532,7 @@ async function sendEmail(unicornDeals) {
       location: deal.item.distance,
       sellerRating: deal.item.sellerRating,
       aiReasoning: deal.item.aiReasoning,
+      description: deal.item.description, // FULL DESCRIPTION
       img: deal.item.img,
       link: deal.item.link,
       isUrgent: isUrgent,
@@ -479,31 +597,21 @@ async function main() {
     const searchConfig = CONFIG.searches[i];
     
     try {
-      const topItems = await scrapeEbay(searchConfig);
+      const unicorns = await scrapeEbay(searchConfig);
       
-      if (topItems.length > 0) {
+      if (unicorns.length > 0) {
         successfulSearches++;
         
         // Store all results
-        topItems.forEach(item => {
+        unicorns.forEach(item => {
           allResults.push({ item, searchConfig });
+          unicornDeals.push({ item, searchConfig });
         });
         
-        // Find unicorn deals (above threshold)
-        const unicorns = topItems.filter(item => item.aiScore >= searchConfig.unicornThreshold);
-        
-        if (unicorns.length > 0) {
-          log(`  🦄 ${unicorns.length} UNICORN(S) FOUND for "${searchConfig.name}"!`);
-          unicorns.forEach(item => {
-            log(`     - ${item.title.substring(0, 60)}... (Score: ${item.aiScore})`);
-            unicornDeals.push({ item, searchConfig });
-          });
-        } else {
-          log(`  No unicorns this time (best score: ${topItems[0]?.aiScore || 'N/A'})`);
-        }
+        log(`  🦄 ${unicorns.length} CONFIRMED UNICORN(S) for "${searchConfig.name}"!`);
       } else {
-        failedSearches++;
-        log(`  ⚠️ No items found for "${searchConfig.name}"`);
+        successfulSearches++;
+        log(`  No unicorns found for "${searchConfig.name}"`);
       }
       
       // Delay between searches to avoid rate limits
@@ -523,7 +631,6 @@ async function main() {
   log('📊 SCAN SUMMARY:');
   log(`Successful searches: ${successfulSearches}/${CONFIG.searches.length}`);
   log(`Failed searches: ${failedSearches}/${CONFIG.searches.length}`);
-  log(`Total items analyzed: ${allResults.length}`);
   log(`Unicorn deals found: ${unicornDeals.length}`);
   log('═══════════════════════════════════════════════════════════');
 
