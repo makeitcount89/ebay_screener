@@ -1,12 +1,13 @@
 name: eBay Deal Monitor
 
 on:
-  schedule:
-    # Runs every 48 hours (2 days) at 9:00 AM UTC
-    # UTC 9:00 = Adelaide 7:30 PM (UTC+10:30)
-    - cron: '0 9 */2 * *'
-  
+  # schedule:
+  #   # Runs every 48 hours (2 days) at 9:00 AM UTC
+  #   # UTC 9:00 = Adelaide 7:30 PM (UTC+10:30)
+  #   - cron: '0 9 */2 * *'
+
   # Allows manual trigger from GitHub Actions tab
+  
   workflow_dispatch:
 
 jobs:
